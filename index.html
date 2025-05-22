@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>WarpAI | Onchain Activity Tracker</title>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@walletconnect/web3-provider@1.7.8/dist/umd/index.min.js"></script>
   <style>
     :root {
       --primary: #00ff88;
@@ -41,6 +43,7 @@
       max-width: 420px;
       margin: 0 auto;
       padding: 16px;
+      padding-bottom: 70px;
     }
 
     .card {
@@ -57,8 +60,12 @@
       justify-content: space-around;
       padding: 12px 0;
       background: var(--card-bg);
-      position: sticky;
+      position: fixed;
       bottom: 0;
+      left: 0;
+      right: 0;
+      max-width: 420px;
+      margin: 0 auto;
       border-top: 1px solid var(--border);
     }
 
@@ -121,6 +128,25 @@
       padding: 8px 0;
       border-bottom: 1px solid var(--border);
     }
+
+    /* Loading State */
+    .loading {
+      text-align: center;
+      padding: 20px;
+    }
+    .spinner {
+      border: 3px solid rgba(0,0,0,0.1);
+      border-radius: 50%;
+      border-top: 3px solid var(--primary);
+      width: 20px;
+      height: 20px;
+      animation: spin 1s linear infinite;
+      margin: 0 auto;
+    }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
   </style>
 </head>
 <body data-theme="dark">
@@ -131,9 +157,12 @@
       <p style="margin: 4px 0 0; font-size: 14px; color: var(--secondary);">Onchain Activity Tracker</p>
     </div>
 
-    <!-- Main Content (Dynamiskt innehåll) -->
+    <!-- Main Content -->
     <div id="app-content">
-      <!-- Innehåll laddas här via JavaScript -->
+      <div class="loading">
+        <div class="spinner"></div>
+        <p>Loading WarpAI...</p>
+      </div>
     </div>
 
     <!-- Navbar -->
@@ -155,40 +184,108 @@
         address: null,
         xp: 0,
         streak: 0,
-        premium: false
+        premium: false,
+        favorites: []
       },
       gasData: null,
       activities: [],
-      leaderboard: []
+      leaderboard: [],
+      rewards: [],
+      provider: null,
+      signer: null
     };
 
     // Initiera appen
     document.addEventListener('DOMContentLoaded', async () => {
       loadTheme();
+      await initializeWeb3();
       await loadInitialData();
       renderCurrentSection();
-      setupEventListeners();
       
-      // Uppdatera data var 30:e sekund
+      // Uppdatera data regelbundet
       setInterval(updateData, 30000);
     });
+
+    // Initiera Web3
+    async function initializeWeb3() {
+      // Kolla om MetaMask finns
+      if (window.ethereum) {
+        state.provider = new ethers.providers.Web3Provider(window.ethereum);
+        
+        try {
+          // Försök hämta befintlig anslutning
+          const accounts = await state.provider.listAccounts();
+          if (accounts.length > 0) {
+            state.user.address = accounts[0];
+            state.walletConnected = true;
+            state.signer = state.provider.getSigner();
+          }
+        } catch (error) {
+          console.error("Error checking wallet connection:", error);
+        }
+        
+        // Lyssna på kontoändringar
+        window.ethereum.on('accountsChanged', (accounts) => {
+          if (accounts.length === 0) {
+            // Wallet disconnected
+            state.walletConnected = false;
+            state.user.address = null;
+          } else {
+            // Wallet changed
+            state.user.address = accounts[0];
+          }
+          renderCurrentSection();
+        });
+      }
+    }
+
+    // Anslut wallet
+    async function connectWallet() {
+      if (!window.ethereum) {
+        alert("Please install MetaMask or another Web3 wallet");
+        return;
+      }
+      
+      try {
+        const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+        state.user.address = accounts[0];
+        state.walletConnected = true;
+        state.provider = new ethers.providers.Web3Provider(window.ethereum);
+        state.signer = state.provider.getSigner();
+        
+        // Spara anslutning
+        localStorage.setItem('walletConnected', 'true');
+        
+        // Ladda om data
+        await loadInitialData();
+        renderCurrentSection();
+      } catch (error) {
+        console.error("Wallet connection error:", error);
+        alert("Wallet connection failed: " + error.message);
+      }
+    }
 
     // Hämta initial data
     async function loadInitialData() {
       try {
-        // Mock data - ersätt med riktiga API-anrop
+        // Hämta gasdata
         state.gasData = await fetchGasData();
-        state.activities = await fetchActivities();
-        state.leaderboard = await fetchLeaderboard();
         
-        // Kolla om användaren har en sparad wallet
-        const savedWallet = localStorage.getItem('walletAddress');
-        if (savedWallet) {
-          connectWallet(savedWallet);
+        // Hämta aktiviteter om wallet är ansluten
+        if (state.walletConnected) {
+          state.activities = await fetchActivities(state.user.address);
+          state.user.xp = await fetchUserXP(state.user.address);
+          state.user.streak = await fetchUserStreak(state.user.address);
+          state.user.premium = await checkPremiumStatus(state.user.address);
         }
+        
+        // Hämta leaderboard och rewards
+        state.leaderboard = await fetchLeaderboard();
+        state.rewards = await fetchAvailableRewards();
+        
       } catch (error) {
         console.error("Initial data load error:", error);
-        showError("Failed to load initial data");
+        showError("Failed to load data. Please try again.");
       }
     }
 
@@ -229,36 +326,45 @@
         <div class="card">
           <h2 style="margin-top: 0;"><i class="fas fa-wallet"></i> Wallet Activity</h2>
           
-          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px;">
-            <div>
-              <small>Total Earned</small>
-              <p style="color: var(--success); font-size: 18px; margin: 4px 0;">+0.42 ETH</p>
-            </div>
-            <div>
-              <small>Total Spent</small>
-              <p style="color: var(--error); font-size: 18px; margin: 4px 0;">-0.15 ETH</p>
-            </div>
-          </div>
-
-          ${state.activities.slice(0, 3).map(activity => `
-            <div class="activity-item">
-              <div class="activity-icon">${getActivityIcon(activity.type)}</div>
+          ${state.walletConnected ? `
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px;">
               <div>
-                <strong>${activity.user}</strong> ${activity.action}
-                <div style="font-size: 12px; color: #aaa;">${activity.time}</div>
+                <small>Total Earned</small>
+                <p style="color: var(--success); font-size: 18px; margin: 4px 0;">+0.42 ETH</p>
+              </div>
+              <div>
+                <small>Total Spent</small>
+                <p style="color: var(--error); font-size: 18px; margin: 4px 0;">-0.15 ETH</p>
               </div>
             </div>
-          `).join('')}
 
-          <div style="display: flex; justify-content: space-between; margin-top: 12px;">
-            <button class="btn btn-primary" onclick="claimXP()">
-              <i class="fas fa-bolt"></i> Claim XP
-            </button>
-            <div style="text-align: right;">
-              <div>🔥 ${state.user.streak} day streak</div>
-              <small>+${calculateDailyXP()} XP tomorrow</small>
+            ${state.activities.slice(0, 3).map(activity => `
+              <div class="activity-item">
+                <div class="activity-icon">${getActivityIcon(activity.type)}</div>
+                <div>
+                  <strong>${activity.user}</strong> ${activity.action}
+                  <div style="font-size: 12px; color: #aaa;">${activity.time}</div>
+                </div>
+              </div>
+            `).join('')}
+
+            <div style="display: flex; justify-content: space-between; margin-top: 12px;">
+              <button class="btn btn-primary" onclick="claimXP()">
+                <i class="fas fa-bolt"></i> Claim XP
+              </button>
+              <div style="text-align: right;">
+                <div>🔥 ${state.user.streak} day streak</div>
+                <small>+${calculateDailyXP()} XP tomorrow</small>
+              </div>
             </div>
-          </div>
+          ` : `
+            <div style="text-align: center; padding: 20px 0;">
+              <p>Connect your wallet to view activity</p>
+              <button class="btn btn-primary" onclick="connectWallet()">
+                <i class="fas fa-wallet"></i> Connect Wallet
+              </button>
+            </div>
+          `}
         </div>
 
         <div class="card">
@@ -279,16 +385,183 @@
           </small>
         </div>
 
-        <div class="card">
-          <h2 style="margin-top: 0;"><i class="fas fa-bolt"></i> Quick Actions</h2>
-          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
-            <button class="btn btn-secondary" onclick="mintToken()">
-              Mint WarpAI Coin
-            </button>
-            <button class="btn btn-secondary" onclick="buyTrending()">
-              Buy Trending
-            </button>
+        ${state.walletConnected ? `
+          <div class="card">
+            <h2 style="margin-top: 0;"><i class="fas fa-bolt"></i> Quick Actions</h2>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+              <button class="btn btn-secondary" onclick="mintToken()">
+                Mint WarpAI Coin
+              </button>
+              <button class="btn btn-secondary" onclick="buyTrending()">
+                Buy Trending
+              </button>
+            </div>
           </div>
+        ` : ''}
+      `;
+    }
+
+    // Activity Feed View
+    function renderActivityFeed() {
+      return `
+        <div class="card">
+          <h2 style="margin-top: 0;"><i class="fas fa-chart-line"></i> Activity Feed</h2>
+          
+          ${state.walletConnected ? `
+            ${state.activities.length > 0 ? 
+              state.activities.map(activity => `
+                <div class="activity-item">
+                  <div class="activity-icon">${getActivityIcon(activity.type)}</div>
+                  <div>
+                    <strong>${activity.user}</strong> ${activity.action}
+                    <div style="font-size: 12px; color: #aaa;">${activity.time}</div>
+                  </div>
+                </div>
+              `).join('') : 
+              '<p style="text-align: center;">No recent activity</p>'
+            }
+          ` : `
+            <div style="text-align: center; padding: 20px 0;">
+              <p>Connect your wallet to view activity</p>
+              <button class="btn btn-primary" onclick="connectWallet()">
+                <i class="fas fa-wallet"></i> Connect Wallet
+              </button>
+            </div>
+          `}
+        </div>
+      `;
+    }
+
+    // Leaderboard View
+    function renderLeaderboard() {
+      return `
+        <div class="card">
+          <h2 style="margin-top: 0;"><i class="fas fa-trophy"></i> Leaderboard</h2>
+          
+          ${state.leaderboard.length > 0 ? `
+            ${state.leaderboard.map(user => `
+              <div class="leaderboard-item">
+                <span>#${user.rank} ${user.username}</span>
+                <span style="color: var(--secondary);">${user.score} XP</span>
+              </div>
+            `).join('')}
+            
+            ${state.walletConnected ? `
+              <div style="margin-top: 16px; text-align: center;">
+                <small>Your rank: #${getUserRank(state.user.address)}</small>
+              </div>
+            ` : ''}
+          ` : `
+            <p style="text-align: center;">Loading leaderboard...</p>
+          `}
+        </div>
+      `;
+    }
+
+    // Rewards View
+    function renderRewards() {
+      return `
+        <div class="card">
+          <h2 style="margin-top: 0;"><i class="fas fa-gift"></i> Rewards</h2>
+          
+          ${state.walletConnected ? `
+            <div style="text-align: center; margin-bottom: 16px;">
+              <p style="font-size: 24px; margin: 8px 0;">${state.user.xp} XP</p>
+              <small>Available to claim: ${calculateClaimableXP()} XP</small>
+            </div>
+            
+            ${state.rewards.length > 0 ? `
+              <h3 style="margin-top: 0;">Available Rewards</h3>
+              ${state.rewards.map(reward => `
+                <div class="activity-item">
+                  <div class="activity-icon">🎁</div>
+                  <div>
+                    <strong>${reward.name}</strong>
+                    <div style="font-size: 14px;">${reward.description}</div>
+                    <div style="display: flex; justify-content: space-between; margin-top: 4px;">
+                      <small>${reward.cost} XP</small>
+                      <button class="btn btn-primary" style="padding: 4px 8px; font-size: 12px;" 
+                        onclick="claimReward('${reward.id}')">
+                        Claim
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              `).join('')}
+            ` : `
+              <p style="text-align: center;">No rewards available</p>
+            `}
+          ` : `
+            <div style="text-align: center; padding: 20px 0;">
+              <p>Connect your wallet to view rewards</p>
+              <button class="btn btn-primary" onclick="connectWallet()">
+                <i class="fas fa-wallet"></i> Connect Wallet
+              </button>
+            </div>
+          `}
+        </div>
+      `;
+    }
+
+    // Profile View
+    function renderProfile() {
+      return `
+        <div class="card">
+          <h2 style="margin-top: 0;"><i class="fas fa-user"></i> Profile</h2>
+          
+          ${state.walletConnected ? `
+            <div style="display: flex; align-items: center; margin-bottom: 16px;">
+              <div style="width: 60px; height: 60px; background: #333; border-radius: 50%; 
+                display: flex; align-items: center; justify-content: center; margin-right: 12px;">
+                <i class="fas fa-user" style="font-size: 24px;"></i>
+              </div>
+              <div>
+                <h3 style="margin: 0;">${shortenAddress(state.user.address)}</h3>
+                ${state.user.premium ? 
+                  '<span class="premium-badge">PREMIUM</span>' : 
+                  '<button class="btn btn-primary" style="margin-top: 4px; padding: 4px 8px;" onclick="upgradeToPremium()">Upgrade</button>'
+                }
+              </div>
+            </div>
+            
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px;">
+              <div>
+                <small>XP Score</small>
+                <p style="font-size: 18px; margin: 4px 0;">${state.user.xp}</p>
+              </div>
+              <div>
+                <small>Current Streak</small>
+                <p style="font-size: 18px; margin: 4px 0;">🔥 ${state.user.streak} days</p>
+              </div>
+            </div>
+            
+            <h3 style="margin-top: 0;">Invite Friends</h3>
+            <div style="background: var(--bg); padding: 12px; border-radius: 8px; margin-bottom: 16px;">
+              <p style="margin: 0 0 8px 0;">Your invite code:</p>
+              <p style="font-family: monospace; font-size: 18px; margin: 0 0 8px 0; word-break: break-all;">
+                WARP-${state.user.address.slice(2, 6).toUpperCase()}
+              </p>
+              <button class="btn btn-secondary" onclick="shareInvite()">
+                <i class="fas fa-share-alt"></i> Share Code
+              </button>
+            </div>
+            
+            <h3 style="margin-top: 0;">Settings</h3>
+            <div style="margin-bottom: 8px;">
+              <label for="themeSelect">Theme:</label>
+              <select id="themeSelect" onchange="changeTheme(this.value)" style="width: 100%; padding: 8px; border-radius: 8px; margin-top: 4px;">
+                <option value="dark">Dark Mode</option>
+                <option value="light">Light Mode</option>
+              </select>
+            </div>
+          ` : `
+            <div style="text-align: center; padding: 20px 0;">
+              <p>Connect your wallet to view profile</p>
+              <button class="btn btn-primary" onclick="connectWallet()">
+                <i class="fas fa-wallet"></i> Connect Wallet
+              </button>
+            </div>
+          `}
         </div>
       `;
     }
@@ -312,37 +585,288 @@
       return 50 + (state.user.streak * 5);
     }
 
-    // Mock API functions
-    async function fetchGasData() {
-      // I en riktig app: await fetch('https://api.owlracle.info/v4/base/gas')
-      return {
-        speeds: [
-          { estimatedFee: 15 },
-          { estimatedFee: 27 },
-          { estimatedFee: 42 }
-        ]
-      };
+    function calculateClaimableXP() {
+      return Math.floor(state.user.xp * 0.1); // 10% of total XP can be claimed
     }
 
-    async function fetchActivities() {
+    function shortenAddress(address) {
+      if (!address) return '';
+      return `${address.slice(0, 6)}...${address.slice(-4)}`;
+    }
+
+    function getUserRank(address) {
+      const user = state.leaderboard.find(u => u.address === address);
+      return user ? user.rank : '--';
+    }
+
+    function showError(message) {
+      const contentDiv = document.getElementById('app-content');
+      contentDiv.innerHTML = `
+        <div class="card">
+          <div style="color: var(--error); padding: 16px; text-align: center;">
+            <i class="fas fa-exclamation-circle"></i> ${message}
+          </div>
+          <button class="btn btn-primary" onclick="location.reload()" style="width: 100%;">
+            Try Again
+          </button>
+        </div>
+      `;
+    }
+
+    function loadTheme() {
+      const savedTheme = localStorage.getItem('theme') || 'dark';
+      document.body.setAttribute('data-theme', savedTheme);
+      if (document.getElementById('themeSelect')) {
+        document.getElementById('themeSelect').value = savedTheme;
+      }
+    }
+
+    function changeTheme(theme) {
+      document.body.setAttribute('data-theme', theme);
+      localStorage.setItem('theme', theme);
+    }
+
+    // API Functions (mockade - ersätt med riktiga anrop)
+    async function fetchGasData() {
+      try {
+        const response = await fetch('https://api.owlracle.info/v4/base/gas?apikey=demo');
+        if (!response.ok) throw new Error("API error");
+        return await response.json();
+      } catch (error) {
+        console.error("Error fetching gas data:", error);
+        return {
+          speeds: [
+            { estimatedFee: 15 },
+            { estimatedFee: 27 },
+            { estimatedFee: 42 }
+          ]
+        };
+      }
+    }
+
+    async function fetchActivities(address) {
+      // Mock data - ersätt med riktigt API-anrop
       return [
-        { type: 'mint', user: 'You', action: 'Minted #123 on Zora', time: '2 mins ago' },
-        { type: 'trade', user: 'You', action: 'Swapped 0.1 ETH for WARP', time: '1 hour ago' },
-        { type: 'transfer', user: 'vitalik.eth', action: 'Sent you 0.05 ETH', time: '3 hours ago' }
+        { 
+          type: 'mint', 
+          user: 'You', 
+          action: 'Minted #123 on Zora', 
+          time: '2 mins ago',
+          txHash: '0x123...abc'
+        },
+        { 
+          type: 'trade', 
+          user: 'You', 
+          action: 'Swapped 0.1 ETH for WARP', 
+          time: '1 hour ago',
+          txHash: '0x456...def'
+        },
+        { 
+          type: 'transfer', 
+          user: 'vitalik.eth', 
+          action: 'Sent you 0.05 ETH', 
+          time: '3 hours ago',
+          txHash: '0x789...ghi'
+        }
       ];
+    }
+
+    async function fetchUserXP(address) {
+      // Mock data - ersätt med riktigt API-anrop
+      return 1245;
+    }
+
+    async function fetchUserStreak(address) {
+      // Mock data - ersätt med riktigt API-anrop
+      return 7;
+    }
+
+    async function checkPremiumStatus(address) {
+      // Mock data - ersätt med riktigt API-anrop
+      return false;
     }
 
     async function fetchLeaderboard() {
+      // Mock data - ersätt med riktigt API-anrop
       return [
-        { rank: 1, user: 'vitalik.eth', score: 15000 },
-        { rank: 2, user: 'satoshi.eth', score: 12000 },
-        { rank: 3, user: 'user123', score: 9500 }
+        { rank: 1, username: 'vitalik.eth', address: '0x123...', score: 15000 },
+        { rank: 2, username: 'satoshi.eth', address: '0x456...', score: 12000 },
+        { rank: 3, username: 'user123', address: '0x789...', score: 9500 }
       ];
     }
 
-    // Ytterligare sektionsrenderare och funktionalitet...
-    // (Leaderboard, Rewards, Profile osv.)
+    async function fetchAvailableRewards() {
+      // Mock data - ersätt med riktigt API-anrop
+      return [
+        { id: '1', name: 'Starter Pack', description: '50 WARP tokens', cost: 100 },
+        { id: '2', name: 'Gas Refill', description: '$5 gas credit', cost: 250 },
+        { id: '3', name: 'Premium Day', description: '24h premium access', cost: 500 }
+      ];
+    }
 
+    // App Functions
+    async function claimXP() {
+      if (!state.walletConnected) {
+        alert("Please connect your wallet first");
+        return;
+      }
+      
+      try {
+        // Här skulle du göra ett riktigt anrop till ditt backend
+        state.user.xp += calculateDailyXP();
+        state.user.streak += 1;
+        renderCurrentSection();
+        
+        // Visa bekräftelse
+        alert(`Success! You claimed ${calculateDailyXP()} XP`);
+      } catch (error) {
+        console.error("Error claiming XP:", error);
+        alert("Failed to claim XP: " + error.message);
+      }
+    }
+
+    async function mintToken() {
+      if (!state.walletConnected) {
+        alert("Please connect your wallet first");
+        return;
+      }
+      
+      try {
+        // Mock implementation - ersätt med riktig Zora minting
+        alert("Minting WarpAI token... (mock implementation)");
+        
+        // Lägg till aktivitet
+        state.activities.unshift({
+          type: 'mint',
+          user: 'You',
+          action: 'Minted WarpAI Token',
+          time: 'Just now',
+          txHash: '0xmocktx'
+        });
+        
+        // Uppdatera XP
+        state.user.xp += 50;
+        renderCurrentSection();
+      } catch (error) {
+        console.error("Error minting token:", error);
+        alert("Failed to mint token: " + error.message);
+      }
+    }
+
+    async function buyTrending() {
+      if (!state.walletConnected) {
+        alert("Please connect your wallet first");
+        return;
+      }
+      
+      try {
+        // Mock implementation
+        alert("Buying trending token... (mock implementation)");
+        
+        // Lägg till aktivitet
+        state.activities.unshift({
+          type: 'trade',
+          user: 'You',
+          action: 'Bought Trending Token',
+          time: 'Just now',
+          txHash: '0xmocktx'
+        });
+        
+        renderCurrentSection();
+      } catch (error) {
+        console.error("Error buying token:", error);
+        alert("Failed to buy token: " + error.message);
+      }
+    }
+
+    async function claimReward(rewardId) {
+      if (!state.walletConnected) {
+        alert("Please connect your wallet first");
+        return;
+      }
+      
+      try {
+        // Hitta reward
+        const reward = state.rewards.find(r => r.id === rewardId);
+        if (!reward) throw new Error("Reward not found");
+        
+        // Kolla om användaren har tillräckligt med XP
+        if (state.user.xp < reward.cost) {
+          alert(`You need ${reward.cost} XP to claim this reward`);
+          return;
+        }
+        
+        // Mock implementation - här skulle du göra ett riktigt anrop
+        state.user.xp -= reward.cost;
+        state.rewards = state.rewards.filter(r => r.id !== rewardId);
+        renderCurrentSection();
+        
+        alert(`Success! You claimed: ${reward.name}`);
+      } catch (error) {
+        console.error("Error claiming reward:", error);
+        alert("Failed to claim reward: " + error.message);
+      }
+    }
+
+    async function upgradeToPremium() {
+      if (!state.walletConnected) {
+        alert("Please connect your wallet first");
+        return;
+      }
+      
+      try {
+        // Mock implementation - här skulle du integrera betalning
+        const confirmed = confirm("Upgrade to Premium for 0.01 ETH?");
+        if (confirmed) {
+          state.user.premium = true;
+          renderCurrentSection();
+          alert("Welcome to WarpAI Premium!");
+        }
+      } catch (error) {
+        console.error("Error upgrading to premium:", error);
+        alert("Failed to upgrade: " + error.message);
+      }
+    }
+
+    async function shareInvite() {
+      if (!state.walletConnected) {
+        alert("Please connect your wallet first");
+        return;
+      }
+      
+      try {
+        const inviteCode = `WARP-${state.user.address.slice(2, 6).toUpperCase()}`;
+        const shareText = `Join me on WarpAI! Use my invite code ${inviteCode} to get 50 bonus XP. ${window.location.href}`;
+        
+        if (navigator.share) {
+          await navigator.share({
+            title: 'Join WarpAI',
+            text: shareText
+          });
+        } else {
+          await navigator.clipboard.writeText(shareText);
+          alert("Invite link copied to clipboard!");
+        }
+        
+        // Ge XP bonus
+        state.user.xp += 10;
+        renderCurrentSection();
+      } catch (error) {
+        console.error("Error sharing invite:", error);
+      }
+    }
+
+    async function updateData() {
+      try {
+        state.gasData = await fetchGasData();
+        if (state.walletConnected) {
+          state.activities = await fetchActivities(state.user.address);
+        }
+        renderCurrentSection();
+      } catch (error) {
+        console.error("Error updating data:", error);
+      }
+    }
   </script>
 </body>
 </html>
